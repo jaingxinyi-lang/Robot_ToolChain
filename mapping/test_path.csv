@@ -1,0 +1,15 @@
+﻿测试项,测试脚本,成功码,错误码
+压力测试,test_stress.sh,SUC100,ERR100
+摄像头,camera_opencv.sh,SUC200,ERR200
+以太网,eth_phy1_iperf3.sh,SUC300,ERR300
+HDMI,hdmi_test.sh,SUC400,ERR400
+USB,USB3.0.sh,SUC500,ERR500
+扬声器L,audio_left.sh,SUC600,ERR600
+扬声器R,audio_right.sh,SUC700,ERR700
+MIC阵列,audio_mic.sh,SUC800,ERR800
+ARGB灯,run_argb_test.sh,SUC900,ERR900
+WIFI,wifi_iperf.sh,SUC1000,ERR1000
+bluetooth,bluetooth.sh,SUC1100,ERR1100
+RTC,RTC.sh,SUC1200,ERR1200
+IMU,XXX.sh,SUC1300,ERR1300
+RS485,XXX.sh,SUC1400,ERR1400

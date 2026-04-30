@@ -1,0 +1,267 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>MainWindow</class>
+ <widget class="QMainWindow" name="MainWindow">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>1172</width>
+    <height>914</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>MainWindow</string>
+  </property>
+  <widget class="QWidget" name="centralwidget">
+   <layout class="QGridLayout" name="gridLayout_4" rowstretch="2,10,3">
+    <property name="leftMargin">
+     <number>9</number>
+    </property>
+    <property name="topMargin">
+     <number>9</number>
+    </property>
+    <property name="rightMargin">
+     <number>9</number>
+    </property>
+    <property name="bottomMargin">
+     <number>9</number>
+    </property>
+    <property name="spacing">
+     <number>9</number>
+    </property>
+    <item row="0" column="0">
+     <layout class="QHBoxLayout" name="topButtonLayout" stretch="1,1,2,1">
+      <property name="spacing">
+       <number>9</number>
+      </property>
+      <property name="sizeConstraint">
+       <enum>QLayout::SetDefaultConstraint</enum>
+      </property>
+      <property name="leftMargin">
+       <number>0</number>
+      </property>
+      <property name="topMargin">
+       <number>9</number>
+      </property>
+      <property name="rightMargin">
+       <number>0</number>
+      </property>
+      <property name="bottomMargin">
+       <number>9</number>
+      </property>
+      <item>
+       <widget class="QPushButton" name="connectBtn">
+        <property name="sizePolicy">
+         <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
+          <horstretch>1</horstretch>
+          <verstretch>0</verstretch>
+         </sizepolicy>
+        </property>
+        <property name="styleSheet">
+         <string notr="true">QPushButton { 
+    background-color: #2ecc71;  /* 默认绿色 */
+    color: white; 
+    border-radius: 6px; 
+    font-size: 28px; 
+    font-weight: bold; 
+}
+
+QPushButton:hover { 
+    background-color: #27ae60;  /* 悬停时稍深的绿色 */
+}
+
+QPushButton:pressed { 
+    background-color: #1e8449;  /* 按下时更深的绿色 */
+}
+
+QPushButton:disabled { 
+    background-color: #4a4a4a;  /* 保持禁用灰色 */
+    color: #888888; 
+}</string>
+        </property>
+        <property name="text">
+         <string>SSH连接</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QPushButton" name="deployBtn">
+        <property name="sizePolicy">
+         <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
+          <horstretch>1</horstretch>
+          <verstretch>0</verstretch>
+         </sizepolicy>
+        </property>
+        <property name="styleSheet">
+         <string notr="true">QPushButton { background-color: #4f46e5; color: white; border-radius: 6px; font-size: 28px; font-weight: bold; }
+QPushButton:hover { background-color: #6366f1; }
+QPushButton:pressed { background-color: #3730a3; }
+QPushButton:disabled { background-color: #4a4a4a; color: #888888; }</string>
+        </property>
+        <property name="text">
+         <string>部署脚本包</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QPushButton" name="runAllBtn">
+        <property name="sizePolicy">
+         <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
+          <horstretch>3</horstretch>
+          <verstretch>0</verstretch>
+         </sizepolicy>
+        </property>
+        <property name="minimumSize">
+         <size>
+          <width>0</width>
+          <height>0</height>
+         </size>
+        </property>
+        <property name="font">
+         <font>
+          <family>Ubuntu Mono</family>
+          <pointsize>-1</pointsize>
+          <bold>true</bold>
+         </font>
+        </property>
+        <property name="styleSheet">
+         <string notr="true">QPushButton { background-color: #27ae60; color: white; border-radius: 6px; font-size: 34px; font-weight: bold; } QPushButton:hover { background-color: #2ecc71; } QPushButton:pressed { background-color: #1e8449; } QPushButton:disabled { background-color: #4a4a4a; color: #888888; }</string>
+        </property>
+        <property name="text">
+         <string>一键测试</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QPushButton" name="stopBtn">
+        <property name="sizePolicy">
+         <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
+          <horstretch>1</horstretch>
+          <verstretch>0</verstretch>
+         </sizepolicy>
+        </property>
+        <property name="minimumSize">
+         <size>
+          <width>0</width>
+          <height>0</height>
+         </size>
+        </property>
+        <property name="styleSheet">
+         <string notr="true">QPushButton { background-color: #e74c3c; color: white; border-radius: 6px; font-size: 34px; font-weight: bold; }
+QPushButton:hover { background-color: #e95a4b; }
+QPushButton:pressed { background-color: #b03a2e; }
+QPushButton:disabled { background-color: #4a4a4a; color: #888888; }</string>
+        </property>
+        <property name="text">
+         <string>停止</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </item>
+    <item row="1" column="0">
+     <layout class="QGridLayout" name="gridLayout_2">
+      <item row="0" column="0">
+       <widget class="QTextEdit" name="terminal_text">
+        <property name="font">
+         <font>
+          <pointsize>14</pointsize>
+         </font>
+        </property>
+        <property name="lineWrapMode">
+         <enum>QTextEdit::NoWrap</enum>
+        </property>
+        <property name="readOnly">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </item>
+    <item row="2" column="0">
+     <layout class="QGridLayout" name="gridLayout_3">
+      <item row="0" column="0">
+       <widget class="QGroupBox" name="groupBox">
+        <property name="enabled">
+         <bool>true</bool>
+        </property>
+        <property name="font">
+         <font>
+          <pointsize>12</pointsize>
+          <bold>true</bold>
+         </font>
+        </property>
+        <property name="styleSheet">
+         <string notr="true">QGroupBox {
+    /* 边框 */
+    border: 2px solid #5a9ad7;
+    border-radius: 8px;
+    
+    /* 标题缩进和上边距（避免边框穿过文字） */
+    margin-top: 10px;
+    padding-top: 5px;
+    padding-left: 10px;
+    padding-right: 10px;
+    padding-bottom: 10px;
+}</string>
+        </property>
+        <property name="title">
+         <string>执行结果</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </item>
+   </layout>
+  </widget>
+  <widget class="QMenuBar" name="menubar">
+   <property name="geometry">
+    <rect>
+     <x>0</x>
+     <y>0</y>
+     <width>1172</width>
+     <height>18</height>
+    </rect>
+   </property>
+   <widget class="QMenu" name="menuSettings">
+    <property name="title">
+     <string>设置</string>
+    </property>
+    <addaction name="actionSSHConfig"/>
+    <addaction name="actionScriptConfig"/>
+    <addaction name="actionScriptPanel"/>
+   </widget>
+   <widget class="QMenu" name="menuAbout">
+    <property name="title">
+     <string>版本信息</string>
+    </property>
+    <addaction name="actionv1_0_base"/>
+   </widget>
+   <addaction name="menuSettings"/>
+   <addaction name="menuAbout"/>
+  </widget>
+  <action name="actionSSHConfig">
+   <property name="text">
+    <string>通信配置...</string>
+   </property>
+  </action>
+  <action name="actionScriptConfig">
+   <property name="text">
+    <string>脚本配置...</string>
+   </property>
+  </action>
+  <action name="actionv1_0_base">
+   <property name="text">
+    <string>v1.4_base</string>
+   </property>
+  </action>
+  <action name="actionScriptPanel">
+   <property name="text">
+    <string>脚本面板...</string>
+   </property>
+  </action>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>
