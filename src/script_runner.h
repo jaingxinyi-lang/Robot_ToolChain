@@ -4,7 +4,6 @@
 #include <QObject>
 #include <QProcess>
 #include <QTimer>
-#include <QVector>
 #include <memory>
 #include <libssh/libssh.h>
 
@@ -176,15 +175,12 @@ private slots:
      */
     void onProcessError(QProcess::ProcessError error);
     void onChannelPollTimeout();
-    void onSerialOutputReceived(const QString &text);
-    void onSerialErrorReceived(const QString &text);
-    void onSerialCommandFinished(int exitCode, QProcess::ExitStatus exitStatus);
-    void onSerialCommandFailed(const QString &message);
 
 private:
-    void disconnectSerialSignals();
     void resetOutputDecoders();
     QString decodeOutput(const QByteArray &data, std::unique_ptr<QTextDecoder> &decoder);
+    // 通过新 SSH channel 强制杀死远程进程树（处理 exec sudo 产生的孤儿进程）
+    void forceKillRemoteProcessTree();
 
     std::unique_ptr<QProcess> m_process;  ///< 本地模式进程对象
     QString m_outputCodec;                ///< 输出文本编码方式
@@ -195,7 +191,8 @@ private:
     CommunicationManager *m_commManager { nullptr };///< 通信管理器（不拥有所有权）
     ssh_channel m_channel     { nullptr };///< 当前远程执行 channel
     QTimer     *m_pollTimer   { nullptr };///< 轮询 channel 输出（50ms）
-    QVector<QMetaObject::Connection> m_serialConnections;
+    qint64      m_remoteShellPid { -1 }; ///< SSH 启动时捕获的远程 shell PID，用于进程树 kill
+    QString     m_remoteScriptPath;      ///< 当前运行的脚本路径
 };
 
 #endif // SCRIPT_RUNNER_H

@@ -1,3 +1,54 @@
+/**
+ * @file mainwindow.cpp
+ * @brief 主窗口 —— 调试工具的顶层协调者
+ *
+ * ┌─────────────────────────────────────────────────────────────────────┐
+ * │  主要数据流概览                                                      │
+ * ├─────────────────────────────────────────────────────────────────────┤
+ * │  ① 脚本执行流                                                        │
+ * │    onScriptButtonClicked / onRunAllClicked                           │
+ * │      → startScriptForSlot(slotIndex)                                │
+ * │            m_currentSlotIndex = slotIndex  ← 必须在 startScript()   │
+ * │                                              之前赋值！              │
+ * │            m_scriptRunner->startScript()                            │
+ * │              └─ emit started()  ← 同步触发 onScriptStarted          │
+ * │                       └─ beginVideoSessionIfNeeded()                │
+ * │                            （依赖 m_currentSlotIndex 已就绪）        │
+ * │    [脚本输出] → onScriptOutput/Error → handleScriptOutputText       │
+ * │          ├─ m_logger->raw()                 日志显示                 │
+ * │          ├─ m_testResultManager->applyText() 结果卡片更新            │
+ * │          └─ parseVideoHandshakeLine()        摄像头握手解析          │
+ * │    [脚本结束] → onScriptFinished / onScriptCrashed                  │
+ * │          → stopVideoSession() + resetScriptRunState()               │
+ * │          → updateButtonStates()                                     │
+ * │                                                                     │
+ * │  ② 一键配置流                                                        │
+ * │    onRunAllClicked                                                   │
+ * │      → 将所有配置了路径的槽位 enqueue 到 m_scriptQueue              │
+ * │      → startNextInQueue()  循环出队、顺序执行各脚本                  │
+ * │      → 单个成功后等 1s (m_runAllIntervalTimer) 再取下一个           │
+ * │      → 队列为空 → 打印"一键配置完成"                                │
+ * │                                                                     │
+ * │  ③ 脚本包部署流                                                      │
+ * │    onDeployClicked                                                   │
+ * │      → FileDeployer::deployPackage()                                │
+ * │            传输 ZIP → 解压 → chmod -R 777 → sync                   │
+ * │      → 成功后 configureScriptsFromMapping()                         │
+ * │            读取 test_path.csv，重建 m_scriptConfigs                 │
+ * │                                                                     │
+ * │  ④ 摄像头视频回传流                                                  │
+ * │    beginVideoSessionIfNeeded()                                      │
+ * │      当前槽位脚本名 == "camera_opencv.sh" 时激活会话                 │
+ * │    → 脚本输出握手字段（顺序任意，VIDEO_READY 最后触发）：            │
+ * │         BOARD_VIDEO_PORT=<port>                                     │
+ * │         BOARD_VIDEO_PATH=<path>                                     │
+ * │         BOARD_IP=<ip>     （串口模式必须；SSH 模式用配置 IP）        │
+ * │         VIDEO_READY       → tryStartVideoStream()                   │
+ * │    → MjpegStreamReceiver 拉取 MJPEG HTTP 流                         │
+ * │    → VideoView 显示于 QSplitter 右半侧                              │
+ * │    → 脚本结束 / 用户停止 → stopVideoSession()                       │
+ * └─────────────────────────────────────────────────────────────────────┘
+ */
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
 #include "script_panel.h"
@@ -10,6 +61,8 @@
 #include "test_result_manager.h"
 #include "mjpeg_stream_receiver.h"
 #include "video_view.h"
+#include "video_session_manager.h"
+#include "rs485_loopback_service.h"
 
 #include <QCoreApplication>
 #include <QDialog>
@@ -29,6 +82,7 @@
 #include <QSet>
 #include <QSizePolicy>
 #include <QSettings>
+#include <QSplitter>
 #include <QStringList>
 #include <QTimer>
 #include <QUrl>
@@ -294,13 +348,13 @@ MainWindow::MainWindow(QWidget *parent)
     initializeScriptConfigs();  
     loadPersistentSettings();
 
-    // 通信管理器
-    m_commDialog->loadFromSettings();
+    // 通信管理器（CommunicationDialog 构造函数内已调用 loadFromSettings）
     m_commDialog->getCommunicationConfig(m_commConfig);
     m_commManager = std::make_unique<CommunicationManager>(this);
     m_commManager->setConfig(m_commConfig);
     m_fileDeployer = std::make_unique<FileDeployer>(m_commManager.get(), this);
     m_testResultManager = std::make_unique<TestResultManager>(ui->groupBox, this);
+    m_rs485Service = std::make_unique<Rs485LoopbackService>(this);
 
     m_timeoutTimer->setSingleShot(true); 
     connect(m_timeoutTimer, &QTimer::timeout, this, &MainWindow::onExecutionTimeout);
@@ -311,6 +365,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_runAllIntervalTimer, &QTimer::timeout, this, &MainWindow::onRunAllScriptIntervalElapsed);
 
     setupConnections();
+    restartRs485Service();
     startIperfServer();
     loadResultMappings();
     // 初始化按钮状态：未连接通信
@@ -332,28 +387,48 @@ void MainWindow::setupScriptDock()
 
 void MainWindow::setupVideoDock()
 {
-    m_videoView = new VideoView(this);
-    m_videoDock = new QDockWidget(QStringLiteral("摄像头视频（10s）"), this);
-    m_videoDock->setObjectName("VideoDock");
-    m_videoDock->setWidget(m_videoView);
-    m_videoDock->setAllowedAreas(Qt::AllDockWidgetAreas);
-    m_videoDock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
-    m_videoDock->setVisible(false);
-    addDockWidget(Qt::RightDockWidgetArea, m_videoDock);
+    // 将 terminal_text 和 VideoView 嵌入水平 QSplitter：
+    // 左侧日志区域保持不变，右侧视频区域默认隐藏；
+    // 视频会话开启时显示右侧并各占 50%，结束后隐藏还原。
+    QGridLayout *gl2 = ui->centralwidget->findChild<QGridLayout*>("gridLayout_2");
+
+    m_videoSplitter = new QSplitter(Qt::Horizontal, ui->centralwidget);
+    m_videoSplitter->addWidget(ui->terminal_text);   // 左：日志
+
+    m_videoView = new VideoView(m_videoSplitter);
+    m_videoSplitter->addWidget(m_videoView);          // 右：视频
+    m_videoView->hide();                              // 默认隐藏
+
+    if (gl2) {
+        gl2->addWidget(m_videoSplitter, 0, 0);
+    }
 
     m_videoReceiver = std::make_unique<MjpegStreamReceiver>();
+    // frameReady 和 streamStopped 直接连到 VideoView/日志，不经过 VideoSessionManager
     connect(m_videoReceiver.get(), &MjpegStreamReceiver::frameReady,
             m_videoView, &VideoView::setFrame);
-    connect(m_videoReceiver.get(), &MjpegStreamReceiver::streamStarted,
-            this, &MainWindow::onVideoStreamStarted);
-    connect(m_videoReceiver.get(), &MjpegStreamReceiver::streamError,
-            this, &MainWindow::onVideoStreamError);
     connect(m_videoReceiver.get(), &MjpegStreamReceiver::streamStopped,
             this, &MainWindow::onVideoStreamStopped);
+
+    // VideoSessionManager 内部已订阅 MjpegStreamReceiver 的 streamStarted/streamError
+    m_videoSessionManager = std::make_unique<VideoSessionManager>(
+        m_videoReceiver.get(), m_videoView, this);
+
+    connect(m_videoSessionManager.get(), &VideoSessionManager::streamConnecting,
+            this, &MainWindow::showVideoPane);
+    connect(m_videoSessionManager.get(), &VideoSessionManager::streamStarted,
+            this, &MainWindow::onVideoStreamStarted);
+    connect(m_videoSessionManager.get(), &VideoSessionManager::streamError,
+            this, &MainWindow::onVideoStreamError);
+    connect(m_videoSessionManager.get(), &VideoSessionManager::sessionEnded,
+            this, &MainWindow::hideVideoPane);
 }
 
 MainWindow::~MainWindow()
 {
+    if (m_rs485Service) {
+        m_rs485Service->stop("应用退出");
+    }
     stopIperfServer();
     if (m_videoReceiver) {
         m_videoReceiver->stop();
@@ -401,9 +476,7 @@ void MainWindow::closeEvent(QCloseEvent *event)
         m_isScriptRunning = false;
     }
     // 如果视频会话还在，接收端先收尾，避免阻塞关闭
-    if (m_videoSessionActive) {
-        stopVideoSession();
-    }
+    m_videoSessionManager->stopSession();
     const bool communicationActive = m_commManager
         && m_commManager->state() != CommunicationManager::State::Disconnected;
     if (communicationActive && m_commManager->isConnected()) {
@@ -426,6 +499,9 @@ void MainWindow::closeEvent(QCloseEvent *event)
 
     if (communicationActive) {
         m_commManager->disconnectCurrent();
+    }
+    if (m_rs485Service) {
+        m_rs485Service->stop("窗口关闭");
     }
     stopIperfServer();
     event->accept();
@@ -455,6 +531,10 @@ void MainWindow::setupConnections()
             this, &MainWindow::onCommunicationDisconnected);
     connect(m_commManager.get(), &CommunicationManager::connectError,
             this, &MainWindow::onCommunicationConnectError);
+
+        // ===== 485 常驻服务信号 =====
+        connect(m_rs485Service.get(), &Rs485LoopbackService::errorOccurred,
+            m_logger.get(), &Logger::error);
 
     // ===== 部署器信号 =====
     connect(m_fileDeployer.get(), &FileDeployer::info,
@@ -577,7 +657,8 @@ void MainWindow::onCommunicationConfigMenuTriggered()
     if (m_commDialog->exec() == QDialog::Accepted) {
         m_commDialog->getCommunicationConfig(m_commConfig);
         m_commManager->setConfig(m_commConfig);
-        m_logger->success(QString("通信配置已保存：%1").arg(m_commManager->modeName()));
+        restartRs485Service();
+        m_logger->success("通信与 485 配置已保存");
         updateButtonStates();
     }
 }
@@ -638,9 +719,7 @@ void MainWindow::onStopClicked()
     if (m_isScriptRunning) {
         m_logger->error("用户强制停止脚本");
         m_timeoutTimer->stop();
-        if (m_videoSessionActive) {
-            stopVideoSession();
-        }
+        m_videoSessionManager->stopSession();
         m_scriptRunner->stopScript(true);
         // 按钮状态将在 onScriptFinished/onScriptCrashed 中恢复
     } else {
@@ -670,8 +749,13 @@ void MainWindow::startScriptForSlot(int slotIndex)
     m_logger->info(QString("=").repeated(60));
     m_logger->info(QString("执行脚本: [%1] %2").arg(slotIndex).arg(config.name));
 
+    // 必须在 startScript 前设置，因为 startScript 内部会 emit started()，
+    // 同步触发 onScriptStarted → beginVideoSessionIfNeeded，后者依赖 m_currentSlotIndex。
+    m_currentSlotIndex = slotIndex;
+
     if (!m_scriptRunner->startScript(config.path, args)) {
         m_logger->error(QString("脚本启动失败: %1").arg(config.path));
+        m_currentSlotIndex = -1;
         if (m_isRunAll) {
             m_scriptQueue.clear();
             m_isRunAll = false;
@@ -681,7 +765,6 @@ void MainWindow::startScriptForSlot(int slotIndex)
     }
 
     m_isScriptRunning = true;
-    m_currentSlotIndex = slotIndex;
     updateButtonStates();
     if (config.timeoutMs > 0) {
         m_timeoutTimer->start(config.timeoutMs);
@@ -734,17 +817,31 @@ void MainWindow::onScriptError(const QString &text)
 
 void MainWindow::handleScriptOutputText(const QString &text)
 {
+    dispatchOutputToLogger(text);        // ① 实时写入日志面板
+    dispatchOutputToResultManager(text); // ② 识别结果码并更新卡片
+    dispatchOutputToVideoSession(text);  // ③ 摄像头握手字段解析
+}
+
+void MainWindow::dispatchOutputToLogger(const QString &text)
+{
     m_logger->raw(text);
+}
+
+void MainWindow::dispatchOutputToResultManager(const QString &text)
+{
     if (m_testResultManager) {
         m_testResultManager->applyOutputText(text);
     }
+}
 
+void MainWindow::dispatchOutputToVideoSession(const QString &text)
+{
     // 摄像头脚本通过 stdout/stderr 上报握手字段，两路输出共用同一解析路径。
-    if (m_videoSessionActive && !m_videoStreamReady) {
+    // VideoSessionManager 内部在流就绪后自动忽略后续输入。
+    if (m_videoSessionManager->isSessionActive()) {
         const QStringList lines = text.split(QRegExp("[\\r\\n]"), Qt::SkipEmptyParts);
         for (const QString &line : lines) {
-            parseVideoHandshakeLine(line);
-            if (m_videoStreamReady) break;
+            m_videoSessionManager->feedLine(line);
         }
     }
 }
@@ -765,30 +862,26 @@ void MainWindow::onScriptStarted(qint64 pid)
 
 void MainWindow::beginVideoSessionIfNeeded()
 {
-    if (m_currentSlotIndex >= 0 && m_currentSlotIndex < m_scriptConfigs.size()) {
-        const ScriptConfig &cfg = m_scriptConfigs[m_currentSlotIndex];
-        if (isVideoScriptPath(cfg.path)) {
-            m_videoSessionActive = true;
-            m_videoStreamReady   = false;
-            m_videoBoardIp.clear();
-            m_videoPath.clear();
-            m_videoPort = 0;
-            if (m_videoView) {
-                m_videoView->clear();
-                m_videoView->setPlaceholderText(QStringLiteral("正在启动摄像头推流…"));
-            }
-            m_logger->info(QStringLiteral("检测到摄像头会话，等待 VIDEO_READY"));
-        }
+    if (m_currentSlotIndex < 0 || m_currentSlotIndex >= m_scriptConfigs.size()) {
+        return;
     }
+    const ScriptConfig &cfg = m_scriptConfigs[m_currentSlotIndex];
+    if (!isVideoScriptPath(cfg.path)) {
+        return;
+    }
+
+    // SSH 模式：优先使用通信配置里的主机名。
+    const QString sshHostOverride = m_commConfig.ssh.host.trimmed();
+
+    m_videoSessionManager->beginSession(sshHostOverride);
+    m_logger->info(QStringLiteral("检测到摄像头会话，等待 VIDEO_READY"));
 }
 
 void MainWindow::onScriptFinished(int exitCode, QProcess::ExitStatus exitStatus)
 {
     m_processWatcher->stopWatching();
     m_timeoutTimer->stop();
-    if (m_videoSessionActive) {
-        stopVideoSession();
-    }
+    m_videoSessionManager->stopSession();
 
     const QString statusStr = (exitStatus == QProcess::NormalExit) ? "正常退出" : "异常退出";
     const bool    success   = (exitCode == 0 && exitStatus == QProcess::NormalExit);
@@ -820,9 +913,7 @@ void MainWindow::onScriptFinished(int exitCode, QProcess::ExitStatus exitStatus)
 void MainWindow::onScriptCrashed(const QString &errorMsg)
 {
     m_timeoutTimer->stop();
-    if (m_videoSessionActive) {
-        stopVideoSession();
-    }
+    m_videoSessionManager->stopSession();
     m_logger->error(errorMsg);
     resetScriptRunState();
     if (m_isRunAll) {
@@ -862,9 +953,7 @@ void MainWindow::onExecutionTimeout()
         m_scriptQueue.clear();
         m_isRunAll = false;
         m_runAllIntervalTimer->stop();
-        if (m_videoSessionActive) {
-            stopVideoSession();
-        }
+        m_videoSessionManager->stopSession();
         m_scriptRunner->stopScript(true);
     }
 }
@@ -1010,6 +1099,14 @@ void MainWindow::configureResponsiveUi()
     ui->groupBox->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 }
 
+void MainWindow::restartRs485Service()
+{
+    if (!m_rs485Service) {
+        return;
+    }
+    m_rs485Service->restart(m_commConfig.rs485);
+}
+
 // ── 通信控制 ──────────────────────────────────────────────────────────────────
 
 void MainWindow::onConnectClicked()
@@ -1027,14 +1124,8 @@ void MainWindow::onConnectClicked()
     } else if (m_commManager->state() == CommunicationManager::State::Disconnected) {
         // 未连接 → 连接
         const CommunicationConfig config = m_commManager->config();
-        if (config.mode == CommunicationMode::Serial) {
-            m_logger->info(QString("正在连接串口：%1 @ %2 ...")
-                .arg(config.serial.portName)
-                .arg(config.serial.baudRate));
-        } else {
-            m_logger->info(QString("正在连接 SSH：%1@%2:%3 ...")
-                .arg(config.ssh.user, config.ssh.host).arg(config.ssh.port));
-        }
+        m_logger->info(QString("正在连接 SSH：%1@%2:%3 ...")
+            .arg(config.ssh.user, config.ssh.host).arg(config.ssh.port));
         updateConnectButton();   // 立即变"连接中..."
         m_commManager->connectCurrent();
     }
@@ -1058,9 +1149,7 @@ void MainWindow::onCommunicationDisconnected(const QString &reason)
         m_scriptQueue.clear();
         m_isRunAll = false;
         m_runAllIntervalTimer->stop();
-        if (m_videoSessionActive) {
-            stopVideoSession();
-        }
+        m_videoSessionManager->stopSession();
         m_scriptRunner->stopScript(true);
         resetScriptRunState();
         m_logger->error("通信断开导致脚本被强制停止");
@@ -1358,105 +1447,21 @@ bool MainWindow::confirmAndCleanupDeployedPackage()
 
 // ── 摄像头视频会话 ───────────────────────────────────────────────────────────
 
-void MainWindow::parseVideoHandshakeLine(const QString &line)
+void MainWindow::showVideoPane()
 {
-    const QString trimmed = line.trimmed();
-    if (trimmed.isEmpty()) return;
-
-    if (trimmed.startsWith(QStringLiteral("BOARD_VIDEO_PORT="))) {
-        const QString val = trimmed.mid(QStringLiteral("BOARD_VIDEO_PORT=").size()).trimmed();
-        bool ok = false;
-        const int p = val.toInt(&ok);
-        if (ok && p > 0 && p <= 65535) {
-            m_videoPort = p;
-        }
-        return;
-    }
-    if (trimmed.startsWith(QStringLiteral("BOARD_VIDEO_PATH="))) {
-        m_videoPath = trimmed.mid(QStringLiteral("BOARD_VIDEO_PATH=").size()).trimmed();
-        return;
-    }
-    if (trimmed.startsWith(QStringLiteral("BOARD_IP="))) {
-        m_videoBoardIp = trimmed.mid(QStringLiteral("BOARD_IP=").size()).trimmed();
-        return;
-    }
-    if (trimmed == QStringLiteral("VIDEO_READY")) {
-        tryStartVideoStream();
-        return;
+    // 在 QSplitter 右侧显示 VideoView，并平均分配宽度。
+    // VideoSessionManager 已在 tryStartStream() 中调用 m_videoView->show()，
+    // 这里只需处理 Splitter 尺寸（MainWindow 独有的布局逻辑）。
+    if (m_videoSplitter) {
+        const int total = m_videoSplitter->width();
+        m_videoSplitter->setSizes({total / 2, total / 2});
     }
 }
 
-void MainWindow::tryStartVideoStream()
+void MainWindow::hideVideoPane()
 {
-    if (m_videoStreamReady) return;
-    if (m_videoPort <= 0 || m_videoPath.isEmpty()) {
-        m_logger->error(QStringLiteral("收到 VIDEO_READY 但握手字段不全，放弃视频显示"));
-        return;
-    }
-
-    // SSH 模式优先用主机名/IP；串口模式用脚本上报的 BOARD_IP。
-    QString host;
-    if (m_commConfig.mode == CommunicationMode::Ssh) {
-        host = m_commConfig.ssh.host.trimmed();
-    }
-    if (host.isEmpty()) {
-        host = m_videoBoardIp.trimmed();
-    }
-    if (host.isEmpty() || host == QLatin1String("0.0.0.0")) {
-        m_logger->error(QStringLiteral("无法确定板卡 IP，无法显示视频"));
-        return;
-    }
-
-    QString path = m_videoPath;
-    if (!path.startsWith('/')) path.prepend('/');
-
-    QUrl url;
-    url.setScheme("http");
-    url.setHost(host);
-    url.setPort(m_videoPort);
-    // setPath 不接受查询串，需用 setUrl 完整解析。
-    const QString full = QStringLiteral("http://%1:%2%3").arg(host).arg(m_videoPort).arg(path);
-    url = QUrl(full);
-    if (!url.isValid()) {
-        m_logger->error(QStringLiteral("视频地址无效: %1").arg(full));
-        return;
-    }
-
-    m_videoStreamReady = true;
-    if (m_videoView) {
-        m_videoView->setPlaceholderText(QStringLiteral("正在接收视频…"));
-    }
-    if (m_videoDock) {
-        m_videoDock->setVisible(true);
-        m_videoDock->raise();
-    }
-    m_logger->info(QStringLiteral("启动视频接收: %1").arg(url.toString()));
-    if (m_videoReceiver) {
-        m_videoReceiver->start(url);
-    }
-}
-
-void MainWindow::stopVideoSession()
-{
-    if (!m_videoSessionActive && !m_videoStreamReady) {
-        if (m_videoDock) m_videoDock->setVisible(false);
-        return;
-    }
-    if (m_videoReceiver) {
-        m_videoReceiver->stop();
-    }
-    if (m_videoView) {
-        m_videoView->clear();
-        m_videoView->setPlaceholderText(QStringLiteral("等待视频信号..."));
-    }
-    if (m_videoDock) {
-        m_videoDock->setVisible(false);
-    }
-    m_videoSessionActive = false;
-    m_videoStreamReady   = false;
-    m_videoBoardIp.clear();
-    m_videoPath.clear();
-    m_videoPort = 0;
+    // 视频面板隐藏：QSplitter 自动回到全宽日志（VideoView 已被 VideoSessionManager 隐藏）。
+    // 此槽由 VideoSessionManager::sessionEnded 信号触发，无需额外操作。
 }
 
 void MainWindow::onVideoFrameReady(const QImage & /*image*/)
@@ -1476,5 +1481,5 @@ void MainWindow::onVideoStreamError(const QString &message)
 
 void MainWindow::onVideoStreamStopped()
 {
-    // 仅日志；UI 收尾在 stopVideoSession 中完成。
+    // 仅日志；UI 收尾在 VideoSessionManager::stopSession() 中完成。
 }

@@ -10,6 +10,7 @@ class QLabel;
 class QPushButton;
 class QTabWidget;
 class QComboBox;
+class QCheckBox;
 class QStackedWidget;
 class SshManager;
 class CommunicationManager;
@@ -44,24 +45,27 @@ struct SshConfig {
 };
 
 enum class CommunicationMode {
-    Ssh,
-    Serial
+    Ssh
 };
 
-struct SerialConfig {
+struct Rs485Config {
+    bool enabled { true };
     QString portName;
-    int baudRate { 1500000 };
+    int startBaudRate { 115200 };
     int dataBits { 8 };
     QString parity { "none" };
     QString stopBits { "1" };
     QString flowControl { "none" };
-    int commandTimeoutMs { 300000 };
+    bool autoModeEnabled { true };
+    QVector<int> allowedBaudRates { 115200, 921600, 1000000, 1500000 };
+    int reconnectIntervalMs { 3000 };
+    int idleSummaryMs { 5000 };
+    int logProgressInterval { 100 };
 };
 
 struct CommunicationConfig {
-    CommunicationMode mode { CommunicationMode::Serial };
     SshConfig ssh;
-    SerialConfig serial;
+    Rs485Config rs485;
 };
 
 /**
@@ -146,29 +150,33 @@ public:
 private slots:
     void onSaveClicked();
     void onCancelClicked();
-    void onRefreshSerialPortsClicked();
+    void onRefreshRs485PortsClicked();
 
 private:
     void buildUi();
     void setupConnections();
-    void populateSerialPorts(const QString &preferredPort = QString());
-    CommunicationMode selectedMode() const;
-    void setSelectedMode(CommunicationMode mode);
+    void populateRs485Ports(const QString &preferredPort = QString());
+    QVector<int> rs485AllowedBaudRates() const;
+    void setRs485AllowedBaudRates(const QVector<int> &baudRates);
 
-    QComboBox   *m_modeCombo       { nullptr };
-    QStackedWidget *m_stack        { nullptr };
+    QTabWidget  *m_tabWidget   { nullptr };
     QLineEdit   *m_hostEdit    { nullptr };
     QLineEdit   *m_userEdit    { nullptr };
     QLineEdit   *m_portEdit    { nullptr };
     QLineEdit   *m_passwordEdit{ nullptr };
-    QComboBox   *m_serialPortCombo { nullptr };
-    QComboBox   *m_baudRateCombo   { nullptr };
-    QComboBox   *m_dataBitsCombo   { nullptr };
-    QComboBox   *m_parityCombo     { nullptr };
-    QComboBox   *m_stopBitsCombo   { nullptr };
-    QComboBox   *m_flowControlCombo{ nullptr };
-    QLineEdit   *m_commandTimeoutEdit { nullptr };
-    QPushButton *m_refreshPortsButton { nullptr };
+    QCheckBox   *m_rs485EnabledCheck { nullptr };
+    QComboBox   *m_rs485PortCombo { nullptr };
+    QComboBox   *m_rs485BaudRateCombo { nullptr };
+    QCheckBox   *m_rs485AutoModeCheck { nullptr };
+    QLineEdit   *m_rs485AllowedBaudsEdit { nullptr };
+    QComboBox   *m_rs485DataBitsCombo { nullptr };
+    QComboBox   *m_rs485ParityCombo { nullptr };
+    QComboBox   *m_rs485StopBitsCombo { nullptr };
+    QComboBox   *m_rs485FlowControlCombo { nullptr };
+    QLineEdit   *m_rs485ReconnectIntervalEdit { nullptr };
+    QLineEdit   *m_rs485IdleSummaryEdit { nullptr };
+    QLineEdit   *m_rs485ProgressIntervalEdit { nullptr };
+    QPushButton *m_refreshRs485PortsButton { nullptr };
     QPushButton *m_saveButton  { nullptr };
     QPushButton *m_cancelButton{ nullptr };
 };

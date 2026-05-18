@@ -1,12 +1,9 @@
 #include "file_deployer.h"
 
 #include <QCoreApplication>
-#include <QFile>
 #include <QFileInfo>
 
 namespace {
-
-constexpr qint64 kSerialUploadRawChunkSize = 6 * 1024;
 
 QString remoteDeployDir()
 {
@@ -16,11 +13,6 @@ QString remoteDeployDir()
 QString remotePackagePath()
 {
     return QStringLiteral("/tmp/JIAOBEN.zip");
-}
-
-QString remoteBase64PackagePath()
-{
-    return QStringLiteral("/tmp/JIAOBEN.zip.b64");
 }
 
 } // namespace
@@ -48,9 +40,6 @@ bool FileDeployer::deployPackage(const QString &packagePath)
     emit info(QString("开始部署脚本包：%1").arg(packagePath));
     processUiEvents();
 
-    if (m_commManager->mode() == CommunicationMode::Serial) {
-        return deployOverSerial(packagePath);
-    }
     return deployOverSsh(packagePath);
 }
 
@@ -109,86 +98,10 @@ bool FileDeployer::deployOverSsh(const QString &packagePath)
 
     const QString unpackCmd = QString("rm -rf %1 && mkdir -p %1 && "
                                       "unzip -o %2 -d %1 && "
+                                      "chmod -R 777 %1 && "
                                       "rm -f %2 && sync")
                                   .arg(deployDir, packageTempPath);
     if (!runRemoteCommand(QString("解压 JIAOBEN.zip 到 %1 ...").arg(deployDir), unpackCmd, 180000, true)) {
-        return false;
-    }
-
-    emit success(QString("脚本包部署完成：%1").arg(deployDir));
-    return true;
-}
-
-bool FileDeployer::deployOverSerial(const QString &packagePath)
-{
-    const QString deployDir = remoteDeployDir();
-    const QString packageTempPath = remotePackagePath();
-    const QString base64TempPath = remoteBase64PackagePath();
-
-    if (!runRemoteCommand(QString("检查开发板 base64/unzip 与用户目录写权限：%1 ...").arg(deployDir),
-                          QString("command -v base64 >/dev/null 2>&1 && "
-                                  "command -v unzip >/dev/null 2>&1 && "
-                                  "mkdir -p %1 && test -w %1")
-                              .arg(deployDir),
-                          30000,
-                          false)) {
-        return false;
-    }
-
-    QFile file(packagePath);
-    if (!file.open(QIODevice::ReadOnly)) {
-        emit error(QString("无法读取脚本包：%1").arg(file.errorString()));
-        return false;
-    }
-    const qint64 totalChunks = file.size() > 0
-        ? (file.size() + kSerialUploadRawChunkSize - 1) / kSerialUploadRawChunkSize
-        : 0;
-
-    runRemoteCommand("关闭串口回显以减少上传日志干扰...", "stty -echo || true", 10000, false);
-    if (!runRemoteCommand("准备串口上传临时文件...", QString(": > %1").arg(base64TempPath), 20000, false)) {
-        runRemoteCommand("恢复串口回显...", "stty echo || true", 10000, false);
-        return false;
-    }
-
-    qint64 chunkIndex = 0;
-    while (!file.atEnd()) {
-        if (m_cancelRequested) {
-            runRemoteCommand("恢复串口回显...", "stty echo || true", 10000, false);
-            emit error("部署已取消");
-            return false;
-        }
-
-        const QByteArray rawChunk = file.read(kSerialUploadRawChunkSize);
-        if (rawChunk.isEmpty() && file.error() != QFile::NoError) {
-            runRemoteCommand("恢复串口回显...", "stty echo || true", 10000, false);
-            emit error(QString("读取脚本包失败：%1").arg(file.errorString()));
-            return false;
-        }
-
-        ++chunkIndex;
-        const QString encodedChunk = QString::fromLatin1(rawChunk.toBase64());
-
-        const QString appendCmd = QString("cat >> %1 <<'RTC_UPLOAD'\n%2\nRTC_UPLOAD")
-            .arg(base64TempPath, encodedChunk);
-        if (!runRemoteCommand(QString("串口上传进度：%1/%2")
-                                  .arg(chunkIndex)
-                                  .arg(totalChunks),
-                              appendCmd,
-                              60000,
-                              false)) {
-            runRemoteCommand("恢复串口回显...", "stty echo || true", 10000, false);
-            return false;
-        }
-    }
-
-    runRemoteCommand("恢复串口回显...", "stty echo || true", 10000, false);
-
-    const QString unpackCmd = QString("rm -f %1 && base64 -d %2 > %1 && "
-                                      "rm -rf %3 && mkdir -p %3 && "
-                                      "unzip -o %1 -d %3 && "
-                                      "rm -f %1 %2 && sync")
-                                  .arg(packageTempPath, base64TempPath, deployDir);
-    if (!runRemoteCommand(QString("解码并解压 JIAOBEN.zip 到 %1 ...").arg(deployDir), unpackCmd, 240000, true)) {
         return false;
     }
 

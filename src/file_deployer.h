@@ -25,7 +25,6 @@ signals:
 
 private:
     bool deployOverSsh(const QString &packagePath);
-    bool deployOverSerial(const QString &packagePath);
     bool runRemoteCommand(const QString &message,
                           const QString &cmd,
                           int timeoutMs = 120000,

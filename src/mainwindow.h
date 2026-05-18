@@ -19,7 +19,10 @@ class FileDeployer;
 class TestResultManager;
 class MjpegStreamReceiver;
 class VideoView;
+class VideoSessionManager;
+class Rs485LoopbackService;
 class QDockWidget;
+class QSplitter;
 class QImage;
 
 QT_BEGIN_NAMESPACE
@@ -103,20 +106,23 @@ private:
     void setupScriptDock();
     void setupVideoDock();
 
-    // 摄像头脚本视频会话：脚本输出握手字段，MainWindow 负责聚合并启动接收器。
-    void parseVideoHandshakeLine(const QString &line);
-    void tryStartVideoStream();
-    void stopVideoSession();
-    void beginVideoSessionIfNeeded();
+    // 摄像头脚本视频会话：通过 VideoSessionManager 管理，MainWindow 只负责 UI 显示。
+    void beginVideoSessionIfNeeded(); // 判断当前脚本是否摄像头脚本，激活 VideoSessionManager
+    void showVideoPane();             // 打开 QSplitter 右侧 VideoView（各占 50%）
+    void hideVideoPane();             // 隐藏 VideoView，还原全宽日志
 
-    // 脚本 stdout/stderr 共用处理：日志、结果码识别、视频握手解析。
+    // 脚本 stdout/stderr 共用处理：由以下三个子函数负责各自职责。
     void handleScriptOutputText(const QString &text);
+    void dispatchOutputToLogger(const QString &text);        // ① 写入日志面板
+    void dispatchOutputToResultManager(const QString &text); // ② 更新结果卡片
+    void dispatchOutputToVideoSession(const QString &text);  // ③ 摄像头握手解析
 
     void setupConnections();
     void initializeScriptConfigs();
     void loadPersistentSettings();
     void savePersistentSettings() const;
     void configureResponsiveUi();
+    void restartRs485Service();
 
     // 启动指定槽位的脚本（内部使用，不检查 m_isScriptRunning）
     void startScriptForSlot(int slotIndex);
@@ -154,17 +160,12 @@ private:
     std::unique_ptr<FileDeployer>    m_fileDeployer;
     std::unique_ptr<TestResultManager> m_testResultManager;
     std::unique_ptr<QProcess>        m_iperfProcess;
-    std::unique_ptr<MjpegStreamReceiver> m_videoReceiver;
-    QDockWidget                     *m_scriptDock{nullptr};
-    QDockWidget                     *m_videoDock{nullptr};
-    VideoView                       *m_videoView{nullptr};
-
-    // 视频会话状态
-    bool    m_videoSessionActive{false};
-    bool    m_videoStreamReady{false};
-    QString m_videoBoardIp;
-    int     m_videoPort{0};
-    QString m_videoPath;
+    std::unique_ptr<MjpegStreamReceiver>  m_videoReceiver;
+    std::unique_ptr<VideoSessionManager>  m_videoSessionManager;
+    std::unique_ptr<Rs485LoopbackService> m_rs485Service;
+    QDockWidget                          *m_scriptDock{nullptr};
+    QSplitter                            *m_videoSplitter{nullptr};
+    VideoView                            *m_videoView{nullptr};
 
     // 脚本配置
     QVector<ScriptConfig> m_scriptConfigs;

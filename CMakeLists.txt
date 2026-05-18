@@ -31,8 +31,10 @@ add_executable(Robot_ToolChain
     src/logger.h
     src/communication_manager.cpp
     src/communication_manager.h
-    src/serial_manager.cpp
-    src/serial_manager.h
+    src/rs485_frame_codec.cpp
+    src/rs485_frame_codec.h
+    src/rs485_loopback_service.cpp
+    src/rs485_loopback_service.h
     src/file_deployer.cpp
     src/file_deployer.h
     src/test_result_card.cpp
@@ -47,6 +49,8 @@ add_executable(Robot_ToolChain
     src/mjpeg_stream_receiver.h
     src/video_view.cpp
     src/video_view.h
+    src/video_session_manager.cpp
+    src/video_session_manager.h
     src/resources/app.rc
     src/resources/icon.qrc
 )

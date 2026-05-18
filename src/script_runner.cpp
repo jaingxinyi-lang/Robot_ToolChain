@@ -1,7 +1,44 @@
+/**
+ * @file script_runner.cpp
+ * @brief 脚本执行引擎 —— 统一本地与远程两种执行模式
+ *
+ * ┌─────────────────────────────────────────────────────────────────────┐
+ * │  执行模式                                                            │
+ * ├─────────────────────────────────────────────────────────────────────┤
+ * │  本地模式（m_remoteMode = false）                                    │
+ * │    启动: QProcess 调用 bash/setsid 运行脚本                          │
+ * │    输出: readyReadStandardOutput/Error 信号 → onReadyReadStdXxx     │
+ * │    结束: QProcess::finished 信号 → onProcessFinished                │
+ * │    停止: process.terminate() / process.kill()                       │
+ * │                                                                     │
+ * │  远程 SSH 模式（CommunicationMode::Ssh）                             │
+ * │    启动: ssh_channel_open_session                                   │
+ * │       1. 申请 PTY（xterm-256color）                                  │
+ * │          目的：使 Ctrl+C (0x03) 经由终端行规发送 SIGINT 给整个        │
+ * │          前台进程组，行为等同 MobaXterm 手动按 Ctrl+C                │
+ * │       2. 命令前注入 "printf '__RSCR_PID:%d\n' $$"                   │
+ * │          目的：捕获 shell 的 PID，供 forceKillRemoteProcessTree 定位  │
+ * │          整个进程树（PGID = $$）                                      │
+ * │       3. ssh_channel_request_exec(finalCmd)                        │
+ * │    轮询: m_pollTimer(50ms) → onChannelPollTimeout                   │
+ * │       · 过滤并移除 __RSCR_PID:<n> 行，保存到 m_remoteShellPid       │
+ * │       · PTY 将 \n 转成 \r\n，统一规范化为 \n 后再 emit outputReceived │
+ * │       · 检测 ssh_channel_is_eof → 读取退出码 → emit finished        │
+ * │    停止: 向 PTY 写 "\x03" (Ctrl+C) → SIGINT 发给前台进程组          │
+ * │       force=true 时额外调 forceKillRemoteProcessTree()：             │
+ * │         kill -9 -- -PGID   杀整个进程组                             │
+ * │         pkill -9 -P PID    杀直接子进程                             │
+ * │         pkill -9 -f NAME   按脚本名兜底                             │
+ * │                                                                     │
+ * └─────────────────────────────────────────────────────────────────────┘
+ */
 #include "script_runner.h"
 #include "communication_manager.h"
 #include <QDebug>
+#include <QFileInfo>
+#include <QRegularExpression>
 #include <QTextCodec>
+#include <QThread>
 
 namespace {
 
@@ -67,8 +104,6 @@ ScriptRunner::~ScriptRunner()
             ssh_channel_close(m_channel);
             ssh_channel_free(m_channel);
             m_channel = nullptr;
-        } else if (m_remoteMode && m_commManager && m_commManager->mode() == CommunicationMode::Serial) {
-            m_commManager->stopSerialCommand(true);
         } else if (m_process && m_process->state() == QProcess::Running) {
             m_process->terminate();
             if (!m_process->waitForFinished(2000)) {
@@ -102,16 +137,6 @@ bool ScriptRunner::startScript(const QString &scriptPath, const QStringList &arg
             cmd += shellQuote(arg);
         }
 
-        if (m_commManager->mode() == CommunicationMode::Serial) {
-            if (!m_commManager->startSerialCommand(cmd)) {
-                emit crashed("串口命令启动失败");
-                return false;
-            }
-            m_isRunning = true;
-            emit started(0);
-            return true;
-        }
-
         // 远程模式：通过 libssh channel 在目标机执行
         if (!m_commManager->sshSession()) {
             emit crashed("SSH 未连接，无法执行远程脚本");
@@ -125,7 +150,17 @@ bool ScriptRunner::startScript(const QString &scriptPath, const QStringList &arg
             return false;
         }
 
-        if (ssh_channel_request_exec(m_channel, cmd.toUtf8().constData()) != SSH_OK) {
+        // 申请 PTY：使信号通过终端行规发送到整个前台进程组（等同 MobaXterm Ctrl+C 行为）
+        // 申请失败时降级运行，仍可用 pkill 兜底
+        if (ssh_channel_request_pty_size(m_channel, "xterm-256color", 200, 50) != SSH_OK) {
+            qWarning() << "SSH PTY 申请失败，进程树 kill 可能受限";
+        }
+
+        // 在命令前输出 shell PID，供强制停止时定位整个进程树
+        m_remoteScriptPath = scriptPath;
+        m_remoteShellPid   = -1;
+        const QString finalCmd = "printf '__RSCR_PID:%d\\n' $$; exec sh -c " + shellQuote(cmd);
+        if (ssh_channel_request_exec(m_channel, finalCmd.toUtf8().constData()) != SSH_OK) {
             ssh_channel_close(m_channel);
             ssh_channel_free(m_channel);
             m_channel = nullptr;
@@ -183,14 +218,17 @@ bool ScriptRunner::stopScript(bool force)
     }
 
     if (m_remoteMode && m_channel) {
-        // 远程模式：向远程进程发送信号
-        ssh_channel_request_send_signal(m_channel, force ? "KILL" : "TERM");
+        // 通过 PTY 行规发 Ctrl+C（SIGINT），杀死整个前台进程组（bash/sudo/子进程全部收到）
+        ssh_channel_write(m_channel, "\x03", 1);
+        if (force) {
+            // 额外通过新 channel pkill 兜底，处理 ignore SIGINT 的进程
+            forceKillRemoteProcessTree();
+            ssh_channel_request_send_signal(m_channel, "KILL");
+        } else {
+            ssh_channel_request_send_signal(m_channel, "TERM");
+        }
         // channel 由 onChannelPollTimeout 检测 EOF 后自动关闭
         return true;
-    }
-
-    if (m_remoteMode && m_commManager && m_commManager->mode() == CommunicationMode::Serial) {
-        return m_commManager->stopSerialCommand(force);
     }
 
     if (!m_process) return false;
@@ -217,9 +255,6 @@ bool ScriptRunner::stopScript(bool force)
 bool ScriptRunner::isRunning() const
 {
     if (m_remoteMode) {
-        if (m_commManager && m_commManager->mode() == CommunicationMode::Serial) {
-            return m_isRunning && m_commManager->serialManager()->isCommandRunning();
-        }
         return m_isRunning && m_channel != nullptr;
     }
 
@@ -320,22 +355,10 @@ void ScriptRunner::setRemoteManager(CommunicationManager *mgr)
 {
     m_remoteMode  = true;
     m_commManager = mgr;
-    disconnectSerialSignals();
-    if (m_commManager && m_commManager->serialManager()) {
-        m_serialConnections.push_back(connect(m_commManager->serialManager(), &SerialManager::outputReceived,
-                                              this, &ScriptRunner::onSerialOutputReceived));
-        m_serialConnections.push_back(connect(m_commManager->serialManager(), &SerialManager::errorReceived,
-                                              this, &ScriptRunner::onSerialErrorReceived));
-        m_serialConnections.push_back(connect(m_commManager->serialManager(), &SerialManager::commandFinished,
-                                              this, &ScriptRunner::onSerialCommandFinished));
-        m_serialConnections.push_back(connect(m_commManager->serialManager(), &SerialManager::commandFailed,
-                                              this, &ScriptRunner::onSerialCommandFailed));
-    }
 }
 
 void ScriptRunner::clearRemoteMode()
 {
-    disconnectSerialSignals();
     m_remoteMode  = false;
     m_commManager = nullptr;
 }
@@ -347,9 +370,24 @@ void ScriptRunner::onChannelPollTimeout()
     char buf[4096];
     int  nbytes;
 
-    // 读取 stdout
+    // 读取 stdout，同时过滤启动时注入的 PID 标记行
     while ((nbytes = ssh_channel_read_nonblocking(m_channel, buf, sizeof(buf), 0)) > 0) {
-        const QString text = decodeOutput(QByteArray(buf, nbytes), m_stdoutDecoder);
+        QString text = decodeOutput(QByteArray(buf, nbytes), m_stdoutDecoder);
+        if (text.isEmpty()) continue;
+
+        // PTY 将 \n 转成 \r\n，规范化为 \n
+        text.replace("\r\n", "\n").replace('\r', '\n');
+
+        // 提取 __RSCR_PID:<n> 标记（只需捕获一次），将该行从输出中移除
+        if (m_remoteShellPid < 0) {
+            static const QRegularExpression pidRe("__RSCR_PID:(\\d+)\\r?\\n?");
+            const QRegularExpressionMatch m = pidRe.match(text);
+            if (m.hasMatch()) {
+                m_remoteShellPid = m.captured(1).toLongLong();
+                text.remove(m.capturedStart(), m.capturedLength());
+            }
+        }
+
         if (!text.isEmpty()) {
             emit outputReceived(text);
         }
@@ -373,43 +411,11 @@ void ScriptRunner::onChannelPollTimeout()
         ssh_channel_free(m_channel);
         m_channel    = nullptr;
         m_isRunning  = false;
+        m_remoteShellPid = -1;
         emit finished(static_cast<int>(exitCode),
                       exitSignal == nullptr && coreDumped == 0 ? QProcess::NormalExit
                                                                : QProcess::CrashExit);
     }
-}
-
-void ScriptRunner::onSerialOutputReceived(const QString &text)
-{
-    emit outputReceived(text);
-}
-
-void ScriptRunner::onSerialErrorReceived(const QString &text)
-{
-    emit errorReceived(text);
-}
-
-void ScriptRunner::onSerialCommandFinished(int exitCode, QProcess::ExitStatus exitStatus)
-{
-    if (!m_isRunning) {
-        return;
-    }
-    m_isRunning = false;
-    emit finished(exitCode, exitStatus);
-}
-
-void ScriptRunner::onSerialCommandFailed(const QString &message)
-{
-    m_isRunning = false;
-    emit crashed(message);
-}
-
-void ScriptRunner::disconnectSerialSignals()
-{
-    for (const QMetaObject::Connection &connection : m_serialConnections) {
-        disconnect(connection);
-    }
-    m_serialConnections.clear();
 }
 
 void ScriptRunner::resetOutputDecoders()
@@ -428,4 +434,39 @@ QString ScriptRunner::decodeOutput(const QByteArray &data, std::unique_ptr<QText
         decoder.reset(codec->makeDecoder());
     }
     return decoder->toUnicode(data);
+}
+
+void ScriptRunner::forceKillRemoteProcessTree()
+{
+    if (!m_commManager || !m_commManager->sshSession()) return;
+
+    // 构建 kill 命令：
+    // 1. kill -9 -- -PGID  杀死整个进程组（处理 exec sudo 后 PGID 未变的情况）
+    // 2. pkill -9 -P PID   杀死直接子进程（处理 sudo fork 出的子 bash）
+    // 3. pkill -9 -f NAME  按脚本名兜底（处理进程树跨 session 的情况）
+    QString killCmd;
+    if (m_remoteShellPid > 0) {
+        killCmd = QString("kill -9 -- -%1 2>/dev/null; pkill -9 -P %1 2>/dev/null; ")
+                      .arg(m_remoteShellPid);
+    }
+    if (!m_remoteScriptPath.isEmpty()) {
+        const QString name = QFileInfo(m_remoteScriptPath).fileName();
+        killCmd += QString("pkill -9 -f '%1' 2>/dev/null; ").arg(name);
+    }
+    if (killCmd.isEmpty()) return;
+    killCmd += "true";
+
+    ssh_channel kc = ssh_channel_new(m_commManager->sshSession());
+    if (!kc) return;
+    if (ssh_channel_open_session(kc) != SSH_OK) {
+        ssh_channel_free(kc);
+        return;
+    }
+    if (ssh_channel_request_exec(kc, killCmd.toUtf8().constData()) == SSH_OK) {
+        // 等待 kill 命令在板端执行完毕
+        QThread::msleep(300);
+    }
+    ssh_channel_close(kc);
+    ssh_channel_free(kc);
+    m_remoteShellPid = -1;
 }

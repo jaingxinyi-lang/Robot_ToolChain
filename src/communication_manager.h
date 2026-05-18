@@ -2,7 +2,6 @@
 #define COMMUNICATION_MANAGER_H
 
 #include "config_dialog.h"
-#include "serial_manager.h"
 #include "ssh_manager.h"
 
 #include <QObject>
@@ -19,7 +18,7 @@ public:
     void setConfig(const CommunicationConfig &config);
     CommunicationConfig config() const { return m_config; }
 
-    CommunicationMode mode() const { return m_config.mode; }
+    CommunicationMode mode() const { return CommunicationMode::Ssh; }
     QString modeName() const;
     QString connectedActionText() const;
     QString disconnectedActionText() const;
@@ -35,11 +34,7 @@ public:
                         int *exitCode = nullptr,
                         int timeoutMs = 12000);
 
-    bool startSerialCommand(const QString &cmd, int timeoutMs = 0);
-    bool stopSerialCommand(bool force = false);
-
     SshManager *sshManager() const { return m_sshManager; }
-    SerialManager *serialManager() const { return m_serialManager; }
     ssh_session sshSession() const;
 
 signals:
@@ -49,7 +44,6 @@ signals:
 
 private:
     SshManager *m_sshManager{nullptr};
-    SerialManager *m_serialManager{nullptr};
     CommunicationConfig m_config;
 };
 
