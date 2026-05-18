@@ -1,0 +1,17 @@
+测试项,测试脚本,成功码,错误码
+net,net.sh,SUC001,ERR001
+压力测试,test_stress.sh,SUC002,ERR002
+摄像头,camera_opencv.sh,SUC003,ERR003
+end0,eth_phy0_iperf3.sh,SUC004,ERR004
+end1,eth_phy1_iperf3.sh,SUC005,ERR005
+enp1s0,eth_pcie_iperf3.sh,SUC006,ERR006
+HDMI,HDMI.sh,SUC007,ERR007
+USB,USB.sh,SUC008,ERR008
+audio_left,audio_left.sh,SUC009,ERR009
+audio_right,audio_right.sh,SUC010,ERR010
+ARGB,run_argb_test.sh,SUC011,ERR011
+WIFI,wifi.sh,SUC012,ERR012
+bluetooth,bluetooth.sh,SUC013,ERR013
+RTC,RTC.sh,SUC014,ERR014
+IMU,imu_test.sh,SUC015,ERR015
+RS485,run_485_test.sh,SUC016,ERR016

@@ -32,10 +32,8 @@ ui_*.h
 qrc_*.cpp
 moc_predefs.h
 
-# 测试数据
-mapping/test_path.csv
-
-# 压缩包
+# 压缩包（排除 JIAOBEN.zip）
 *.zip
+!zip/JIAOBEN.zip
 *.tar.gz
 *.tar
